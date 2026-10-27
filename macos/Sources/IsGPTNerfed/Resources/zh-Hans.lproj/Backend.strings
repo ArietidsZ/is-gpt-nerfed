@@ -128,3 +128,5 @@
 "backend.update.archive-version" = "更新包版本为 %@，发布信息显示的版本为 %@。";
 "backend.update.move-old" = "无法移走旧版应用：%@";
 "backend.update.move-new" = "无法放置新版应用：%@";
+"backend.report.expected" = "用户已确认为预期变化";
+"backend.report.historical-expected" = "历史判断：%@；上下文变化已确认为预期";

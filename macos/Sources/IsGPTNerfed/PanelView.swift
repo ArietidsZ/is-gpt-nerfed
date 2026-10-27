@@ -430,6 +430,7 @@ struct ReportLines: View {
     let probes: [ProbeSummary]
     let evidence: [EvidenceInfo]
     var failure: ProbeSummary? = nil
+    var threadID: String? = nil
 
     static func hasContent(probes: [ProbeSummary], evidence: [EvidenceInfo], failure: ProbeSummary? = nil) -> Bool {
         !probes.isEmpty || !evidence.isEmpty || failure != nil
@@ -439,6 +440,10 @@ struct ReportLines: View {
         VStack(alignment: .leading, spacing: 3) {
             if let p = probes.first {
                 VerdictLine(probe: p)
+                if let historical = p.historicalVerdict {
+                    Text(L10n.tr("Historical %@; context change confirmed as expected", L10n.backend(historical)))
+                        .foregroundStyle(.secondary)
+                }
                 if let r = p.results, !r.isEmpty, !p.isFailure, p.staleAccount != true {
                     fact(L10n.tr("Fingerprint"), r.map { "\($0.model ?? "?") \(ProbeSummary.pct($0.probability))" }.joined(separator: " · "))
                 }
@@ -465,9 +470,19 @@ struct ReportLines: View {
             }
             ForEach(evidence) { e in
                 let on = e.active ?? true
-                Text(L10n.evidenceText(e.text, ago: e.ago, active: on))
+                Text(L10n.evidenceText(e.text, ago: e.ago, active: on, expected: e.expected == true))
                     .foregroundStyle(on ? (e.severity == "hard" ? Color.red : (e.severity == "soft" ? Color.orange : Color.green)) : Color.secondary)
                     .lineLimit(2)
+                    .contextMenu {
+                        if let threadID, let evidenceID = e.evidenceId, !evidenceID.isEmpty,
+                           e.kind == "context_window_change", e.severity == "hard",
+                           !store.demo, store.snapshot?.demo != true {
+                            Button(L10n.tr(e.expected == true ? "Undo expected change" : "Mark as expected change")) {
+                                Task { await store.setEvidenceExpected(threadID: threadID, evidence: e) }
+                            }
+                            .disabled(store.evidenceActionPending(threadID: threadID, evidenceID: evidenceID))
+                        }
+                    }
             }
         }
         .font(Type.text)
@@ -569,7 +584,7 @@ struct ThreadRow: View {
                                 }
                             }
                         } report: {
-                            ReportLines(probes: history, evidence: thread.evidence ?? [], failure: thread.lastFailure)
+                            ReportLines(probes: history, evidence: thread.evidence ?? [], failure: thread.lastFailure, threadID: thread.id)
                         }
                     }
                 }

@@ -16,6 +16,8 @@ final class Store {
     var snapshot: Snapshot?
     var lastError: String?
     var refreshing = false
+    private var refreshWithoutSchedulingRequested = false
+    private var pendingEvidenceActions: Set<String> = []
     var lastRefresh: Date?
     var installing = false
     var updating = false
@@ -48,10 +50,19 @@ final class Store {
         }
     }
 
-    func refresh() async {
-        if refreshing { return }
+    func refresh(allowScheduledWork: Bool = true) async {
+        if refreshing {
+            if !allowScheduledWork { refreshWithoutSchedulingRequested = true }
+            return
+        }
         refreshing = true
-        defer { refreshing = false }
+        defer {
+            refreshing = false
+            if refreshWithoutSchedulingRequested {
+                refreshWithoutSchedulingRequested = false
+                Task { [weak self] in await self?.refresh(allowScheduledWork: false) }
+            }
+        }
         do {
             let json = try await DGC.run(["snapshot", "--json"] + (demo ? ["--demo"] : []), timeout: 20)
             let decoder = JSONDecoder()
@@ -67,7 +78,7 @@ final class Store {
                 appLog.notice("status \(snap.overall.status, privacy: .public): \(snap.overall.message, privacy: .public) · hooks \(snap.hooks?.state ?? "?", privacy: .public) · desktop loaded \(snap.hooks?.desktopLoaded ?? false, privacy: .public)")
             }
             // Fresh-session heartbeat: the hooks fire it while threads are active; the app covers idle periods.
-            if snap.freshDue == true, snap.globalRunning != true, pendingFresh == nil, !demo,
+            if allowScheduledWork, snap.freshDue == true, snap.globalRunning != true, pendingFresh == nil, !demo,
                Date().timeIntervalSince(lastHeartbeat) > 300 {
                 lastHeartbeat = Date()
                 appLog.notice("fresh-session heartbeat due; starting a fresh probe")
@@ -75,7 +86,7 @@ final class Store {
             }
             // Thread heartbeat: the Stop hook runs the schedule while a thread is in use, so a thread that goes quiet
             // right after its due time would wait for a Stop event that may never come. The app covers that gap.
-            if !demo, Date().timeIntervalSince(lastTick) > 60,
+            if allowScheduledWork, !demo, Date().timeIntervalSince(lastTick) > 60,
                snap.threads.contains(where: { $0.due && $0.active && !$0.probeRunning && !$0.halted }) {
                 lastTick = Date()
                 tick()
@@ -191,6 +202,27 @@ final class Store {
         appLog.notice("resume requested for thread \(thread.id, privacy: .public)")
         do { _ = try await DGC.run(["resume", "--thread", thread.id]) } catch { lastError = error.localizedDescription }
         await refresh()
+    }
+
+    func evidenceActionPending(threadID: String, evidenceID: String) -> Bool {
+        pendingEvidenceActions.contains(threadID + ":" + evidenceID)
+    }
+
+    func setEvidenceExpected(threadID: String, evidence: EvidenceInfo) async {
+        guard !demo, snapshot?.demo != true, let evidenceID = evidence.evidenceId, !evidenceID.isEmpty,
+              evidence.kind == "context_window_change", evidence.severity == "hard" else { return }
+        let key = threadID + ":" + evidenceID
+        guard pendingEvidenceActions.insert(key).inserted else { return }
+        defer { pendingEvidenceActions.remove(key) }
+        let arguments = ["evidence-expected", "--thread", threadID, "--evidence", evidenceID]
+            + (evidence.expected == true ? ["--undo"] : [])
+        do {
+            _ = try await DGC.run(arguments)
+            // A manual confirmation only changes the ledger; it must not start a probe.
+            await refresh(allowScheduledWork: false)
+        } catch {
+            lastError = error.localizedDescription
+        }
     }
 
     func setConfig(_ key: String, _ value: String) async {

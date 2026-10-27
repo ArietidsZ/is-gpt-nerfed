@@ -142,12 +142,19 @@ struct ThreadInfo: Codable, Identifiable {
 
 /// One scanner finding as the panel shows it; `active` is false once a later change reverted it.
 struct EvidenceInfo: Codable, Identifiable {
+    var evidenceId: String?
     var text: String
     var ts: String?
     var ago: String?
     var severity: String?
     var active: Bool?
-    var id: String { (ts ?? "") + text }
+    var kind: String?
+    var expected: Bool?
+    var id: String { evidenceId ?? ((ts ?? "") + text) }
+    enum CodingKeys: String, CodingKey {
+        case evidenceId = "id"
+        case text, ts, ago, severity, active, kind, expected
+    }
 }
 
 /// One row of the fingerprint attribution ("gpt-5.6-luna 91%").
@@ -164,6 +171,7 @@ struct ProbeSummary: Codable, Identifiable {
     var finished: String?
     var finishedAgo: String?
     var verdict: String?
+    var historicalVerdict: String?
     var direction: String?
     var expected: String?
     var prediction: String?

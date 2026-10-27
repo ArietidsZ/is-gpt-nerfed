@@ -110,10 +110,11 @@ enum L10n {
         }
     }
 
-    static func evidenceText(_ text: String, ago: String?, active: Bool, language: String? = nil) -> String {
+    static func evidenceText(_ text: String, ago: String?, active: Bool, expected: Bool = false, language: String? = nil) -> String {
         var result = backend(text, language: language)
         if let ago = localizedAgo(ago, language: language), !ago.isEmpty { result += " · \(ago)" }
-        if !active { result += " · \(tr("reverted", language: language))" }
+        if expected { result += " · \(tr("Expected by you", language: language))" }
+        else if !active { result += " · \(tr("reverted", language: language))" }
         return result
     }
 

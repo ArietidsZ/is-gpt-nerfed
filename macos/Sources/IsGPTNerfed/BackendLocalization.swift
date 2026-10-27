@@ -10,6 +10,7 @@ extension L10n {
     }()
 
     private static let backendPatterns: [String: NSRegularExpression] = [
+        "report-historical-expected": #"^historical (.+); context change confirmed as expected$"#,
         "session-title": #"^Session (\d+)$"#,
         "quote-mismatch-downgrade-a": #"^🎉 Congrats! You've been nerfed! You asked for (\S+); the fingerprint says (\S+) \((\d+%), (\d+)/(\d+) answers\)\. Enjoy the discount you didn't ask for\.$"#,
         "quote-mismatch-downgrade-b": #"^Great news: your (\S+) session is answering like (\S+) \((\d+%)\)\. Nobody told you, but somebody saved money\. Congrats!$"#,
@@ -336,6 +337,8 @@ extension L10n {
                 output.append(backendFormat("backend.report.prediction-declared", arguments: c, language: language))
             } else if let c = backendMatch("report-prediction", part) {
                 output.append(c[0] + " " + c[1])
+            } else if let c = backendMatch("report-historical-expected", part) {
+                output.append(backendFormat("backend.report.historical-expected", arguments: [verdict(c[0], language: language) ?? c[0]], language: language))
             } else if let age = translatedAge(part, language: language) {
                 output.append(age)
             } else {
@@ -348,7 +351,11 @@ extension L10n {
     private static func translateReportEvidence(_ value: String, language: String?) -> String {
         var remainder = value
         var reverted = false
-        if remainder.hasSuffix(" · reverted") {
+        var expected = false
+        if remainder.hasSuffix(" · expected by user") {
+            remainder.removeLast(" · expected by user".count)
+            expected = true
+        } else if remainder.hasSuffix(" · reverted") {
             remainder.removeLast(" · reverted".count)
             reverted = true
         }
@@ -360,7 +367,8 @@ extension L10n {
         }
         var result = backendFormat("backend.report.evidence", language: language) + " · " + backendLine(remainder, language: language)
         if let age { result += " · " + age }
-        if reverted { result += " · " + backendFormat("backend.report.reverted", language: language) }
+        if expected { result += " · " + backendFormat("backend.report.expected", language: language) }
+        else if reverted { result += " · " + backendFormat("backend.report.reverted", language: language) }
         return result
     }
 

@@ -3,6 +3,38 @@ import XCTest
 @testable import IsGPTNerfed
 
 final class LocalizationTests: XCTestCase {
+    func testExpectedEvidenceDecodesBackendIdentityAndKeepsLegacyDisplayFallback() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let current = try decoder.decode(EvidenceInfo.self, from: Data(#"{"id":"finding-1","text":"Context window 828k → 568k","kind":"context_window_change","severity":"hard","active":false,"expected":true}"#.utf8))
+        XCTAssertEqual(current.evidenceId, "finding-1")
+        XCTAssertEqual(current.id, "finding-1")
+        XCTAssertEqual(current.expected, true)
+        let legacy = try decoder.decode(EvidenceInfo.self, from: Data(#"{"text":"old finding","ts":"old-time","active":false}"#.utf8))
+        XCTAssertNil(legacy.evidenceId, "display fallback must never become a mutation ID")
+        XCTAssertEqual(legacy.id, "old-timeold finding")
+    }
+
+    func testExpectedEvidenceIsNotPresentedAsReverted() {
+        let source = "Context window 828k → 568k"
+        let english = L10n.evidenceText(source, ago: "3m ago", active: false, expected: true, language: "en")
+        XCTAssertTrue(english.contains("Expected by you"))
+        XCTAssertFalse(english.contains("reverted"))
+        let chinese = L10n.evidenceText(source, ago: "3m ago", active: false, expected: true, language: "zh-Hans")
+        XCTAssertTrue(chinese.contains("你已确认为预期变化"))
+        let report = L10n.backend("Evidence · \(source) · 3m ago · expected by user", language: "zh-Hans")
+        XCTAssertTrue(report.contains("用户已确认为预期变化"))
+        XCTAssertFalse(report.contains("reverted"))
+    }
+
+    func testProjectedProbeReportExplainsHistoricalVerdict() {
+        let source = "Last probe · Match · historical DOWNGRADED!; context change confirmed as expected · probe fixture"
+        let translated = L10n.backend(source, language: "zh-Hans")
+        XCTAssertTrue(translated.contains("历史判断"))
+        XCTAssertTrue(translated.contains("上下文变化已确认为预期"))
+        XCTAssertFalse(translated.contains("historical DOWNGRADED"))
+    }
+
     func testChineseTranslationsAndFormatArguments() {
         XCTAssertEqual(L10n.tr("Match", language: "zh-Hans"), "匹配")
         XCTAssertEqual(L10n.tr("%@ of %@ answers", language: "zh-Hans", arguments: ["2", "3"]), "可用回答 2 / 3")

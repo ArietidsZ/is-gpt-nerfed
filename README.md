@@ -105,6 +105,25 @@ Settings are in the app, or `nerfed config set <key> <value>`:
 | `hide_titles` | `false` | screenshot mode: neutral session names, no account |
 | `check_updates` | `true` | ask GitHub for a newer release every 10 minutes |
 
+### Intentional context-window changes
+
+If you deliberately reduced a session's context window, expand its report and
+use **Mark as expected change** on that exact context finding. **Undo expected
+change** restores the warning. The original finding and probe history remain;
+later reductions, model/effort changes and genuine fingerprint mismatches are
+not dismissed. Incomplete historical fingerprint data retains its warning.
+
+The equivalent offline CLI is:
+
+```bash
+nerfed evidence --thread FULL_THREAD_ID
+nerfed evidence-expected --thread FULL_THREAD_ID --evidence FINDING_ID
+nerfed evidence-expected --thread FULL_THREAD_ID --evidence FINDING_ID --undo
+```
+
+Confirmation does not run a probe or infer your intent from today's config. It
+does not clear an existing safety halt; use **Resume** explicitly if appropriate.
+
 ## Accounts
 
 Sessions are shared between Codex accounts, and a downgrade may be tied to the account rather than the session.

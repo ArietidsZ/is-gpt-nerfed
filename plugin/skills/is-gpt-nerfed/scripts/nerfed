@@ -23,7 +23,9 @@ import contextlib
 import datetime as dt
 import fcntl
 import glob
+import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -557,15 +559,16 @@ def scan_rollout(path: str, scan: dict, hidden=frozenset(), cap_bytes: int = 64 
     info  -> logged for completeness
     """
     new_ev: list[dict] = []
+    record_offset = 0
 
     def add(kind: str, severity: str, detail: str, ts=None, turn=None, **extra):
-        key = f"{kind}|{detail}|{ts}"
+        key = f"{kind}|{detail}|{ts}|{record_offset}"
         keys = scan.setdefault("ev_keys", [])
         if key in keys:
             return
         keys.append(key)
         usage = scan.get("usage_percent")
-        new_ev.append({"ts": ts or iso(), "kind": kind, "severity": severity, "detail": detail, "turn_id": turn,
+        new_ev.append({"id": uuid.uuid4().hex, "ts": ts or iso(), "kind": kind, "severity": severity, "detail": detail, "turn_id": turn,
                        "usage_percent": usage, **extra})
 
     try:
@@ -583,7 +586,10 @@ def scan_rollout(path: str, scan: dict, hidden=frozenset(), cap_bytes: int = 64 
     end = data.rfind(b"\n")
     if end < 0:
         return new_ev
+    next_offset = cur
     for raw in data[:end].split(b"\n"):
+        record_offset = next_offset
+        next_offset += len(raw) + 1
         if not raw.strip():
             continue
         try:
@@ -1701,7 +1707,20 @@ def cmd_probe_fresh(args) -> int:
 
 
 def deliver_alerts(st: dict, out: dict, model_visible: bool, cfg: dict) -> None:
-    pending = [a for a in st.get("alerts") or [] if not a.get("delivered")]
+    pending = []
+    for alert in st.get("alerts") or []:
+        if alert.get("delivered"):
+            continue
+        if alert.get("verdict") == "DOWNGRADED!" and alert.get("probe"):
+            rec = read_json(probe_path(alert["probe"]), {}) or {}
+            if (isinstance(rec, dict) and rec.get("id") == alert["probe"]
+                    and rec.get("thread_id") == st.get("sid") and rec.get("verdict") == "DOWNGRADED!"):
+                projected = expected_probe_projection(
+                    {"id": alert["probe"], "verdict": "DOWNGRADED!"}, st.get("evidence") or [], cfg)
+                if projected and projected.get("historical_verdict"):
+                    # Keep the queued record intact: undoing confirmation can restore delivery.
+                    continue
+        pending.append(alert)
     if not pending:
         return
     text = "\n".join(a["text"] for a in pending)
@@ -1821,6 +1840,21 @@ EVIDENCE_DIMENSION = {"silent_model_change": "model", "applied_model_change": "m
                       "context_window_change": "ctx", "service_tier_change": "tier"}
 
 
+def evidence_id(e: dict, index: int) -> str:
+    if isinstance(e.get("id"), str) and e["id"]:
+        return e["id"]
+    # Legacy rows remain readable without rewriting history. Include occurrence
+    # position so identical historical findings cannot confirm one another.
+    original = [index] + [e.get(k) for k in ("kind", "ts", "detail", "turn_id", "severity")]
+    return "legacy-" + hashlib.sha256(json.dumps(original, sort_keys=True).encode()).hexdigest()[:32]
+
+
+def expected_context(e: dict) -> bool:
+    confirmation = e.get("expected")
+    return (e.get("kind") == "context_window_change" and e.get("severity") == "hard"
+            and isinstance(confirmation, dict) and confirmation.get("reason") == "user_confirmed_context_change")
+
+
 def active_evidence(evs: list) -> list:
     """Findings that still describe the current state: for each dimension (model, effort, context window, tier)
     only the latest change counts, so a downgrade that was later reverted stops being an alert (it stays in the
@@ -1828,7 +1862,7 @@ def active_evidence(evs: list) -> list:
     latest: dict = {}
     for e in evs or []:
         latest[EVIDENCE_DIMENSION.get(e.get("kind"), e.get("kind"))] = e
-    return [e for e in latest.values() if e.get("severity") in ("hard", "soft", "good")]
+    return [e for e in latest.values() if e.get("severity") in ("hard", "soft", "good") and not expected_context(e)]
 
 
 def at_usage_limit(e: dict) -> bool:
@@ -1866,7 +1900,7 @@ def compact_evidence(e: dict) -> str:
 
 
 def evidence_line(e: dict) -> str:
-    return f"{e['kind']} [{e['severity']}] {e['detail']}"
+    return f"{e['kind']} [{e['severity']}] {e['detail']}" + (" [expected by user]" if expected_context(e) else "")
 
 
 def ago(ts: float | None) -> str:
@@ -1947,6 +1981,8 @@ def probe_line(p: dict) -> str:
     if p.get("stale_account"):  # a verdict from another account is not one for this account
         parts[0] = "Unverified"
         parts.insert(1, f"{word}, account unknown" if p.get("account_state") == "unknown" else f"{word}, another account")
+    if p.get("historical_verdict"):
+        parts.append(f"historical {p['historical_verdict']}; context change confirmed as expected")
     parts.append(f"probe {p.get('id')}")
     return " · ".join(parts)
 
@@ -1960,10 +1996,10 @@ def probe_row_valid(r: dict) -> bool:
 def evidence_entries(evs: list, active: list, limit: int = 8) -> list[dict]:
     """Hard and soft findings of one thread for the panel's in-place report, newest first; `active` marks the ones
     still in effect (the others were reverted by a later change and stay for the record)."""
-    keys = {(a.get("kind"), a.get("ts")) for a in active}
-    rows = [e for e in evs if e.get("severity") in ("hard", "soft", "good")][-limit:]
-    return [{"text": compact_evidence(e), "ts": e.get("ts"), "ago": ago(parse_iso(e.get("ts"))), "severity": e.get("severity"),
-             "active": (e.get("kind"), e.get("ts")) in keys} for e in rows][::-1]
+    rows = [(i, e) for i, e in enumerate(evs) if e.get("severity") in ("hard", "soft", "good")][-limit:]
+    return [{"id": evidence_id(e, i), "text": compact_evidence(e), "ts": e.get("ts"),
+             "ago": ago(parse_iso(e.get("ts"))), "severity": e.get("severity"), "kind": e.get("kind"),
+             "expected": expected_context(e), "active": any(e is a for a in active)} for i, e in rows][::-1]
 
 
 def report_text_for(title: str, model: str | None, effort: str | None, probes: list[dict], evidence: list[dict],
@@ -1979,12 +2015,15 @@ def report_text_for(title: str, model: str | None, effort: str | None, probes: l
     if failure:
         lines.append("Last attempt · " + probe_line(failure))
     for e in evidence:
-        lines.append(f"Evidence · {e['text']}" + (f" · {e['ago']}" if e.get("ago") else "") + ("" if e.get("active", True) else " · reverted"))
+        state = " · expected by user" if e.get("expected") else ("" if e.get("active", True) else " · reverted")
+        lines.append(f"Evidence · {e['text']}" + (f" · {e['ago']}" if e.get("ago") else "") + state)
     return "\n".join(lines)
 
 
 def probe_summary(row: dict, current: str | None = None) -> dict:
     full = read_json(probe_path(row["id"]), {}) or {}
+    if not isinstance(full, dict):
+        full = {}
     errors = full.get("errors") or []
     verdict = row.get("verdict") or full.get("verdict")
     status = row.get("status") or full.get("status")
@@ -2009,6 +2048,53 @@ def probe_summary(row: dict, current: str | None = None) -> dict:
         "retryable": (status == "failed" or verdict == "INVALID") and (not errors or transport_like(errors)),
         "retries": row.get("retries") or full.get("retries") or 0,
     }
+
+
+def expected_probe_projection(summary: dict | None, evidence: list, cfg: dict) -> dict | None:
+    """Clear only a confirmed passive-only downgrade backed by a saved MATCH.
+    Do not rewrite probe history, rerun inference, or guess when old data is incomplete."""
+    if not summary or summary.get("verdict") != "DOWNGRADED!":
+        return summary
+    full = read_json(probe_path(summary["id"]), {}) or {}
+    if not isinstance(full, dict):
+        return summary
+    hard = full.get("hard_evidence")
+    if not isinstance(hard, list) or not hard or any(not isinstance(e, dict) for e in hard):
+        return summary
+    for original in hard:
+        if original.get("id"):
+            matches = [e for e in evidence if e.get("id") == original["id"]]
+        else:
+            matches = [e for e in evidence if all(e.get(k) == original.get(k)
+                       for k in ("kind", "ts", "detail", "turn_id", "severity"))]
+        if len(matches) != 1 or not expected_context(matches[0]):
+            return summary
+    results, used = full.get("results"), full.get("used_outputs")
+    if not isinstance(results, list) or not results or not isinstance(used, int) or isinstance(used, bool) or used < 1:
+        return summary
+    for result in results:
+        if not isinstance(result, dict) or not isinstance(result.get("model"), str) or not result["model"].strip():
+            return summary
+        try:
+            finite = all(isinstance(result.get(k), (int, float)) and not isinstance(result[k], bool)
+                         and math.isfinite(result[k]) for k in ("probability", "score"))
+        except (ValueError, OverflowError):
+            finite = False
+        if not finite or not 0 <= result["probability"] <= 1:
+            return summary
+    if len({r["model"] for r in results}) != len(results):
+        return summary
+    if any(a["probability"] < b["probability"] or a["score"] < b["score"] for a, b in zip(results, results[1:])):
+        return summary
+    if not isinstance(full.get("expected"), str) or not full["expected"]:
+        return summary
+    assessment = assess(full.get("expected"), {"results": results, "used_outputs": used}, [], cfg)
+    # A mismatch, uncertainty, or missing expected model is never dismissed by
+    # confirming a context change. Keep the original warning conservatively.
+    if assessment["verdict"] != "MATCH":
+        return summary
+    return {**summary, "historical_verdict": summary["verdict"], "verdict": "MATCH", "direction": None,
+            "is_downgrade": False, "is_upgrade": False, "is_suspicious": False, "quote": None}
 
 
 def demo_snapshot(cfg: dict) -> dict:
@@ -2193,6 +2279,7 @@ def build_snapshot(cfg: dict, hours: float = 48.0) -> dict:
         t["last_evidence_ago"] = ago(parse_iso(shown[-1].get("ts"))) if shown else None
         t["last_evidence_severity"] = shown[-1].get("severity") if shown else None
         t["evidence"] = evidence_entries(st.get("evidence") or [], active)
+        t["_evidence_records"] = st.get("evidence") or []
     index_rows = list(iter_jsonl(PROBES_INDEX))
     by_thread: dict[str, list] = {}
     for row in index_rows:
@@ -2203,10 +2290,13 @@ def build_snapshot(cfg: dict, hours: float = 48.0) -> dict:
     for t in threads.values():
         rows = by_thread.get(t["id"], [])
         valid = [r for r in rows if probe_row_valid(r)]
-        t["last_probe"] = probe_summary(valid[-1], acct["id"]) if valid else None  # the verdict
+        t["last_probe"] = expected_probe_projection(
+            probe_summary(valid[-1], acct["id"]) if valid else None, t.pop("_evidence_records", []), cfg)
         failed = rows[-1] if rows and not probe_row_valid(rows[-1]) else None      # a newer failed attempt: Retry
         t["last_failure"] = probe_summary(failed, acct["id"]) if failed else None
         t["probes"] = [probe_summary(r, acct["id"]) for r in valid[-5:]][::-1]
+        if t["last_probe"] and t["last_probe"].get("historical_verdict"):
+            t["probes"] = [t["last_probe"] if p["id"] == t["last_probe"]["id"] else p for p in t["probes"]]
         t.setdefault("evidence", [])
         stale = bool(t["last_probe"] and t["last_probe"]["stale_account"])
         t["unverified"] = stale  # verdict obtained under another Codex account: says nothing about this one
@@ -2234,6 +2324,11 @@ def build_snapshot(cfg: dict, hours: float = 48.0) -> dict:
     global_failure = probe_summary(fresh_rows[-1], acct["id"]) if fresh_rows and not probe_row_valid(fresh_rows[-1]) else None
     valid_rows = [r for r in index_rows if probe_row_valid(r)]
     last_verdict = probe_summary(valid_rows[-1], acct["id"]) if valid_rows else None
+    if last_verdict:
+        projected = next((t["last_probe"] for t in out_threads if t.get("last_probe")
+                          and t["last_probe"]["id"] == last_verdict["id"]), None)
+        if projected:
+            last_verdict = projected
     global_stale = bool(global_probe and global_probe["stale_account"])
     global_alert = bool(global_probe and global_probe["is_downgrade"] and not global_stale)
     global_upgraded = bool(global_probe and global_probe.get("is_upgrade") and not global_stale)
@@ -2703,15 +2798,39 @@ def cmd_evidence(args) -> int:
         sessions = [s for s in sessions if s["sid"].startswith(args.thread) or (s.get("parent_thread_id") or "").startswith(args.thread)]
     count = 0
     for s in sessions:
-        evs = [e for e in s.get("evidence") or [] if args.all or e.get("severity") in ("hard", "soft")]
+        evs = [(i, e) for i, e in enumerate(s.get("evidence") or []) if args.all or e.get("severity") in ("hard", "soft")]
         if not evs:
             continue
         print(f"session {s['sid']}  kind={s.get('kind')}  cwd={s.get('cwd')}  turns={s.get('turns')}")
-        for e in evs:
-            print(f"   {e.get('ts')}  {evidence_line(e)}")
+        for i, e in evs:
+            print(f"   {e.get('ts')}  {evidence_id(e, i)}  {evidence_line(e)}")
             count += 1
     if not count:
         print("no evidence recorded" + ("" if args.all else " (use --all to include info-level entries)"))
+    return 0
+
+
+def cmd_evidence_expected(args) -> int:
+    # Unlike display filters, mutations require an exact persisted thread ID.
+    existing = read_json(session_path(args.thread), {}) or {}
+    if existing.get("sid") != args.thread:
+        raise SystemExit("unknown exact thread id")
+    with locked_session(args.thread) as st:
+        if st.get("sid") != args.thread:
+            raise SystemExit("thread identity changed")
+        matches = [(i, e) for i, e in enumerate(st.get("evidence") or []) if evidence_id(e, i) == args.evidence]
+        if len(matches) != 1:
+            raise SystemExit("unknown, stale or ambiguous evidence id")
+        _, finding = matches[0]
+        if finding.get("kind") != "context_window_change" or finding.get("severity") != "hard":
+            raise SystemExit("only a hard context-window change can be confirmed as expected")
+        finding.setdefault("id", args.evidence)
+        if args.undo:
+            finding.pop("expected", None)
+        elif not expected_context(finding):
+            finding["expected"] = {"reason": "user_confirmed_context_change", "at": iso()}
+    log_event("context_expectation_changed", sid=args.thread, evidence=args.evidence, expected=not args.undo)
+    print("context confirmation removed" if args.undo else "context change marked as expected")
     return 0
 
 
@@ -3253,6 +3372,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--thread")
     s.add_argument("--all", action="store_true")
     s.set_defaults(fn=cmd_evidence)
+    s = sub.add_parser("evidence-expected", help="confirm one context change as expected, or undo that confirmation")
+    s.add_argument("--thread", required=True)
+    s.add_argument("--evidence", required=True)
+    s.add_argument("--undo", action="store_true")
+    s.set_defaults(fn=cmd_evidence_expected)
     s = sub.add_parser("scan", help="scan one rollout file now")
     s.add_argument("--thread")
     s.add_argument("--rollout")

@@ -159,3 +159,7 @@
 "Rewrite the docs site" = "重做文档站";
 "Migrate to Postgres 17" = "迁移到 Postgres 17";
 "Write release notes v2.3" = "编写 v2.3 更新说明";
+"Expected by you" = "你已确认为预期变化";
+"Mark as expected change" = "标记为预期变化";
+"Undo expected change" = "撤销预期变化标记";
+"Historical %@; context change confirmed as expected" = "历史判断：%@；上下文变化已确认为预期";

@@ -128,3 +128,5 @@
 "backend.update.archive-version" = "The archive is version %@, but the release says %@.";
 "backend.update.move-old" = "Could not move the previous app aside: %@";
 "backend.update.move-new" = "Could not put the new app in place: %@";
+"backend.report.expected" = "expected by user";
+"backend.report.historical-expected" = "historical %@; context change confirmed as expected";

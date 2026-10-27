@@ -1,0 +1,37 @@
+name: Context expectation checks
+
+on:
+  push:
+    branches: [dots/context-expected-20261027]
+  pull_request:
+    paths:
+      - 'plugin/**'
+      - 'tests/**'
+      - 'macos/**'
+      - '.github/workflows/context-expected-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  offline-and-macos:
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      NERFED_NO_UPDATE_CHECK: '1'
+      CODEX_HOME: ${{ runner.temp }}/nerfed-test-codex
+      NERFED_HOME: ${{ runner.temp }}/nerfed-test-ledger
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Offline synthetic tests and JavaScript parity
+        run: python3 -m unittest discover -s tests -v
+      - name: Swift compilation, decoding and localization tests
+        run: swift test --package-path macos

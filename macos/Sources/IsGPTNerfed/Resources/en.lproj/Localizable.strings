@@ -159,3 +159,7 @@
 "Rewrite the docs site" = "Rewrite the docs site";
 "Migrate to Postgres 17" = "Migrate to Postgres 17";
 "Write release notes v2.3" = "Write release notes v2.3";
+"Expected by you" = "Expected by you";
+"Mark as expected change" = "Mark as expected change";
+"Undo expected change" = "Undo expected change";
+"Historical %@; context change confirmed as expected" = "Historical %@; context change confirmed as expected";
