@@ -19,9 +19,11 @@ jobs:
     timeout-minutes: 20
     env:
       NERFED_NO_UPDATE_CHECK: '1'
-      CODEX_HOME: ${{ runner.temp }}/nerfed-test-codex
-      NERFED_HOME: ${{ runner.temp }}/nerfed-test-ledger
     steps:
+      - name: Isolate test state
+        run: |
+          echo "CODEX_HOME=$RUNNER_TEMP/nerfed-test-codex" >> "$GITHUB_ENV"
+          echo "NERFED_HOME=$RUNNER_TEMP/nerfed-test-ledger" >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
